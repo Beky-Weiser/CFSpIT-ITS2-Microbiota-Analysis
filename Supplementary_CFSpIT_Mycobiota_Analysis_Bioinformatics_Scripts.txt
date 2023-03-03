@@ -1,0 +1,351 @@
+###################################################
+#CFSpIT MYCOOBIOTA ANALYSIS BIOINFORMATICS SCRIPTS#
+###################################################
+
+#Author: Rebecca Weiser
+#Accompanies: Weiser et al. (2023)
+
+#Novogene ITS2 amplification and sequencing (380 bp; Orgiazzi et al. 2012 primers ITS3-2024F & ITS4-2409R)
+#All analysis was performed using a virtual machine hosted by the Cloud Infrastructure for Microbial Bioinformatics (CLIMB) consortium
+#Parallel was used to run multiple tasks in parallel (O. Tange (2011): GNU Parallel - The Command-Line Power Tool,;login: The USENIX Magazine, February 2011:42-47)
+
+
+#########################################
+#Preparing sequences for QIIME2 analysis#
+#########################################
+
+#UPLOAD FILES
+
+#Upload the demultiplexed forward (R1) and reverse (R2) sequences from ITS2 region sequencing to CLIMB
+
+#RENAME .fq.gz FILES TO THE SAMPLE IDENTIFIERS
+
+#In windows create a text file (fungal_diversity_rename.txt) with original file name (column 1) and new name (column (2)
+#Upload to folder with .fq.gz files
+
+#check for DOS return carriage ^M
+cat -v filename.txt
+
+#remove DOS return carriage
+sed -i -e 's/\r//g' filename.txt
+
+#check DOS return carriage has been removed
+cat -v filename.txt 						
+
+#mass rename the .fq.gz files based on the text file
+parallel -j 2 --colsep '\t' 'mv {1} {2}' :::: fungal_diversity_rename.txt				
+
+
+#SEQUENCE QC USING FASTQC AND MULTIQC
+
+#Navigate to folder containing reads
+#Make a new folder for fastqc and multiqc results
+
+mkdir fastqc_output
+fastqc *.fq.gz -o fastqc_output
+multiqc --interactive .					
+
+#View multiqc report to check sequence quality
+#Mostly fine except some look like high illumina adapter content
+
+#TRIM SEQUENCES WITH TRIM GALORE
+
+#Make input file for parallel (column {1} R1 file names, column {2} R2 file names)
+
+ls *1.fq.gz > R1_file_names.txt
+ls *2.fq.gz > R2_file_names.txt
+paste R1_file_names.txt R2_file_names.txt > R1R2_file_names.txt	
+
+#Run trim galore with options for illumina paired-end sequencing and run fastqc on trimmed files
+parallel -j 2 --colsep '\t' 'trim_galore --illumina --paired --fastqc -o trim_galore_output/ {1} {2}' :::: R1R2_file_name.txt	
+
+#Navigate into trim_galore_output and run multiqc
+multiqc --interactive .	
+
+#View multiqc report to check sequence quality before and after trimming
+#All sequences ok after trimming
+
+#################
+#QIIME2 ANALYSIS#
+#################
+
+#Installing QIIME2
+
+#Need conda https://seq.space/climb/doku.php?id=setup-miniconda
+
+wget "https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh"
+bash Miniconda3-latest-Linux-x86_64.sh
+
+#check you have the latest version
+conda update conda	
+
+#Install QIIME 2 within a conda environment
+wget https://data.qiime2.org/distro/core/qiime2-2020.11-py36-linux-conda.yml
+conda env create -n qiime2-2020.11 --file qiime2-2020.11-py36-linux-conda.yml
+
+#Optional clean-up
+rm qiime2-2020.11-py36-linux-conda.yml
+
+#Activate the conda environment
+conda activate qiime2-2020.11
+
+#Deactivate the conda environment
+conda deactivate 
+
+#Which conda environment is active?
+conda info
+
+#Test installation
+qiime --help
+
+#Check everything installed in QIIME2 environment
+
+conda activate qiime2-2020.11
+conda list
+
+#Import files into QIIME2
+
+#Make manifest file for import of .fq.gz files
+#Make a text file in Windows with columns for sample id, absolute path to forward reads and absolute path to reverse reads
+#e.g. absolute path to folder with reverse reads: /home/ubuntu/volume1/CFSpIT_fungal_diversity/raw_reads_rename/
+#Save as pe-33-manifest.txt
+
+#e.g. layout
+#sample-id	forward-absolute-filepath	reverse-absolute-filepath
+#sample1	$PWD/pe-64/s1-phred64-r1.fastq.gz	$PWD/pe-64/s1-phred64-r2.fastq.gz
+#sample2	$PWD/pe-64/s2-phred64-r1.fastq.gz	$PWD/pe-64/s2-phred64-r2.fastq.gz
+
+#Upload to CLIMB and remove DOS carriage
+
+#check for DOS return carriage ^M
+cat -v filename.txt
+
+#remove DOS return carriage 						
+sed -i -e 's/\r//g' filename.txt
+
+#check DOS return carriage has been removed			
+cat -v filename.txt 						
+
+#Import format depends on sequence files, sequencing from Novogene was paired-end Fastq with Phred offset 33
+#Need to use PairedEndFastqManifestPhred33V2
+#Navigate to the directory where the pe-33-manifest.txt is saved to run import command, all outputs also go into here
+
+qiime tools import \
+  --type 'SampleData[PairedEndSequencesWithQuality]' \
+  --input-path pe-33-manifest.txt \
+  --output-path paired-end-demux.qza \
+  --input-format PairedEndFastqManifestPhred33V2
+
+#Output message
+#Imported pe-33-manifest.txt as PairedEndFastqManifestPhred33V2 to paired-end-demux.qza
+
+#Output artifacts:
+#paired-end-demux.qza
+
+#Summarise the quality of the data
+qiime demux summarize \
+  --i-data paired-end-demux.qza \
+  --o-visualization paired-end-demux.qzv			
+  
+#Visualisation file paired-end-demux.qzv
+#Can download, drag and drop onto website to see QC https://view.qiime2.org/ 
+
+#Forward and reverse sequence sets looks similar (~224 bases average) and ok quality (all above QC score of 25), sequences reduce in quality after about 180 bases
+
+#Use ITSxpress QIIME2 plugin to trim ITS sequences
+#PAPER: Rivers et al. (2018) doi: 10.12688/f1000research.15704.1
+#https://forum.qiime2.org/t/q2-itsxpress-a-tutorial-on-a-qiime-2-plugin-to-trim-its-sequences/5780
+#https://q2-itsxpress.readthedocs.io/en/latest/readme.html
+
+#In the QIIME2 environment, install ITSxpress and Q2-itsxpress
+
+conda install -c bioconda itsxpress
+pip install q2-itsxpress
+
+#In the QIIME2 environment, refresh the plugins
+
+qiime dev refresh-cache
+
+#Check to see if the ITSxpress plugin has installed, after running this command you should see a basic help menu
+
+qiime itsxpress
+
+#ITSxpress trim-pair-output-unmerged takes paired-end QIIME artifacts SampleData[PairedEndSequencesWithQuality] for trimming
+#It merges the reads, temporally clusters the reads, then looks for the ends of the ITS region with Hmmsearch
+#Theoretically if sequences are good quality, do not need to perform a trimming step as ITSxpress does this
+#itsxpress trim-pair-output-unmerged returns the unmerged, trimmed sequences.
+
+#Needed to install latest version of bbmap for it to work (https://forum.qiime2.org/t/itsxpress-bbmerge-error/15807/10)
+conda install -y -c bioconda bbmap==38.69
+
+#Default dereplication (99.5%)
+
+qiime itsxpress trim-pair-output-unmerged\
+  --i-per-sample-sequences paired-end-demux.qza \
+  --p-region ITS2 \
+  --p-taxa F \
+  --o-trimmed trimmed.qza			
+  
+#output file
+#trimmed.qza
+  
+#Use Dada2 to identify sequence variants
+#The trimmed sequences can be fed directly into Dada2 using the denoise-paired command
+#Since BBmerge handled the merging and quality issues there is no need to trim or truncate the reads further
+#Set truncation length to 0 because the data quality was good
+
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs trimmed.qza \
+  --p-trunc-len-r 0 \
+  --p-trunc-len-f 0 \
+  --output-dir dada2out
+  
+#Outputs in new directory dada2out
+#dada2out/denoising_stats.qza
+#dada2out/representative_sequences.qza
+#dada2out/table.qza
+
+#Navigate into dada2out
+
+qiime metadata tabulate \
+  --m-input-file denoising_stats.qza \
+  --o-visualization denoising_stats.qzv
+  
+#output
+denoising_stats.qzv
+
+#UNITE database for sequence classification
+#Download the newest UNITE database for QIIME2 and unzip the file
+#Download the smaller dataset selected with dynamic thresholds determined by fungal experts
+
+#Navigate back to previous directory
+
+cd ../
+
+wget https://files.plutof.ut.ee/public/orig/98/AE/98AE96C6593FC9C52D1C46B96C2D9064291F4DBA625EF189FEC1CCAFCF4A1691.gz
+
+#rename sh_qiime_release_04.02.2020.tar.gz
+
+tar -xvf sh_qiime_release_04.02.2020.tar.gz
+
+#outputs new directory with lots of files
+
+#Import into QIIME2
+
+qiime tools import \
+  --type 'FeatureData[Sequence]' \
+  --input-path sh_giime_release_04.02.2020/sh_refs_qiime_ver8_dynamic_04.02.2020.fasta \
+  --output-path unite.qza
+  
+#output
+unite.qza
+
+#Import the associated UNITE taxonomy file
+
+qiime tools import \
+  --type 'FeatureData[Taxonomy]' \
+  --input-format HeaderlessTSVTaxonomyFormat \
+  --input-path sh_qiime_release_04.02.2020/sh_taxonomy_qiime_ver8_dynamic_04.02.2020.txt \
+  --output-path unite-taxonomy.qza
+  
+#output
+unite-taxonomy.qza
+
+#Train the QIIME classifier
+#QIIME provides its own naive Bayes classifier similar to RDP from the python package SciKit Learn
+#Before using it the classifier must be trained using the data you just imported
+
+qiime feature-classifier fit-classifier-naive-bayes \
+  --i-reference-reads unite.qza \
+  --i-reference-taxonomy unite-taxonomy.qza \
+  --o-classifier classifier.qza
+  
+#output
+classifier.qza
+
+#Classify the sequence variants from dada2
+#Once the classifier is trained sequences can be classified.
+
+qiime feature-classifier classify-sklearn \
+  --i-classifier classifier.qza \
+  --i-reads dada2out/representative_sequences.qza \
+  --o-classification taxonomy_trimmed.qza
+  
+#output
+taxonomy_trimmed.qza
+
+#Summarize the results for visualization in the QIIME 2 viewer
+
+qiime metadata tabulate \
+  --m-input-file taxonomy_trimmed.qza \
+  --o-visualization taxonomy_trimmed.qzv
+
+#Output
+taxonomy_trimmed.qzv
+
+#Create an interactive bar plot figure (need to use mapping file -> Fungal_diversity_metadata.txt)
+  
+qiime taxa barplot \
+  --i-table dada2out/table.qza  \
+  --i-taxonomy taxonomy_trimmed.qza \
+  --m-metadata-file Fungal_diversity_metadata.txt \
+  --o-visualization taxa-bar-plots.qzv
+
+#Output
+taxa-bar-plots.qzv
+
+#Examine data further in QIIME2
+
+#FeatureTable and FeatureData summaries
+
+#The feature-table summarize command will give you information on how many sequences are associated with each sample and with each feature, histograms of those distributions, and some related summary statistics
+#The feature-table tabulate-seqs command will provide a mapping of feature IDs to sequences, and provide links to easily BLAST each sequence against the NCBI nt database
+#A metadata file is required in .tsv or .txt (tab-separated) format (Fungal_diversity_metadata.txt): https://docs.qiime2.org/2023.2/tutorials/metadata/
+
+qiime feature-table summarize \
+  --i-table dada2out/table.qza \
+  --o-visualization table.qzv \
+  --m-sample-metadata-file Fungal_diversity_metadata.txt
+  
+qiime feature-table tabulate-seqs \
+  --i-data dada2out/representative_sequences.qza \
+  --o-visualization rep-seqs.qzv
+
+#outputs
+table.qzv
+rep-seqs.qzv
+
+#Generate a tree for phylogenetic diversity analyses
+#mafftt and fasttree (unrooted and rooted from midpoint trees)
+
+qiime phylogeny align-to-tree-mafft-fasttree \
+  --i-sequences dada2out/representative_sequences.qza \
+  --o-alignment aligned-rep-seqs.qza \
+  --o-masked-alignment masked-aligned-rep-seqs.qza \
+  --o-tree unrooted-tree_trimmed.qza \
+  --o-rooted-tree rooted-tree_trimmed.qza
+  
+#outputs
+aligned-rep-seqs.qza
+masked-aligned-rep-seqs.qza
+rooted-tree_trimmed.qza
+unrooted-tree_trimmed.qza
+
+##########################
+#DOWNSTREAM ANALYSIS IN R#
+##########################
+
+#All further analysis was performed in R and is detailed in another Supplementary document (Supplementary_CFSpIT_Mycobiota_Analysis_R_code.Rmd)
+#The following files were imported into R using the package qiime2r (https://github.com/jbisanz/qiime2R):
+
+#features="table.qza"
+#tree="rooted-tree_trimmed.qza"
+#taxonomy="taxonomy_trimmed.qza"
+#metadata = "Fungal_diversity_metadata_all_samples_qPCR.txt")
+
+#The metadata .txt was created in windows following QIIME2 guidelines: https://docs.qiime2.org/2023.2/tutorials/metadata/
+
+
+
+
+
