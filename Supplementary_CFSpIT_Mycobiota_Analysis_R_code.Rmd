@@ -1,0 +1,1181 @@
+---
+title: "CFSpIT Fungal Diversity Analysis"
+author: "Rebecca Weiser"
+output: html_document
+date: "2023-02-24"
+---
+
+##Analysis overview
+
+This R code was used to perform analysis of the outputs of QIIME2-UNITE database pipeline.
+
+The scripts describe:
+
+1. **Importing data in Phyloseq and formatting** and **Checking for contamination with Decontam** 
+2. **Phyloseq for read processing and subsampling** (Table S1) **and generation of an ASV table** (Supplementary spreadsheet)
+3. **Alpha diversity analysis** (Figure 1A)
+4. **Beta diversity analysis** (Figure 1B, Figure 3, Figure 4, Supplementary Figure S2,Table S2)
+5. **GAMLESS-BEZI and Indicator species analysis** (Table S2 and Table S3) 
+6. **Generation of stacked bar charts to visualise and compare microbiota profiles** (Figure 1C, Figure 3, Supplementary Figure S2)
+7. **Investigating associations between age and fungal diversity** (Figure S3)
+
+Other analysis was performed in Microsoft Excel to produce Table 1, Table S1, Table S2, Figure 2 and Figure S1.
+Microsoft PowerPoint was used to produce final versions of figures.
+
+##Importing data in Phyloseq and formatting
+
+Import data from QIIME2 into phyloseq and create a phyloseq object
+The data came from a larger dataset with 230 samples
+
+```{r}
+
+#Set working directory to file location
+setwd("C:/PATH/TO/FILES")
+
+library(phyloseq)
+library(qiime2R)
+
+#Read in QIIME2 and metadata files
+physeq<-qza_to_phyloseq(features="table.qza", tree="rooted-tree_trimmed.qza", taxonomy = "taxonomy_trimmed.qza", metadata = "Fungal_diversity_metadata_all_samples_qPCR.txt")
+
+#Check object
+physeq
+```
+
+Subset to samples from this study - 29 matched BAL1, BAL2, BAL and IS samples, 1 mock community and 3 CF DNA extraction controls
+
+```{r}
+View(sample_data(physeq))
+levels(sample_data(physeq)$Matched.samples) 
+# "BAL_un" "BAL1" "BAL2" "BAL2_r" "BAL3" "CF_Control" "IS" "Mock" "Og_Control" "Sputum" 
+
+#Subset to 29 matched samples sets (116 samples), 3 controls and 1 mock = 120
+CFSpIT_matched_controls <- subset_samples(physeq, Matched.samples=="BAL1" | Matched.samples=="BAL2" | Matched.samples=="BAL3" | Matched.samples=="IS" | Matched.samples=="CF_Control" | Matched.samples=="Mock")
+CFSpIT_matched_controls
+
+#Tidy up the phyloseq object by keeping ASVs >0 reads
+CFSpIT_matched_controls_above0 = prune_taxa(taxa_sums(CFSpIT_matched_controls)>0, CFSpIT_matched_controls)
+CFSpIT_matched_controls_above0
+```
+
+Clean up taxonomy table: Get rid of "unidentified" assignments in taxonomy table and change all blanks to lowest taxonomic rank
+
+```{r}
+head(tax_table(CFSpIT_matched_controls_above0))
+tax.clean<-data.frame(tax_table(CFSpIT_matched_controls_above0))
+
+#change unidentified to nothing
+library(DataCombine)
+
+Replaces <- data.frame(from = c("unidentified"), to = c(""))
+
+tax.clean.unidentified<-FindReplace(data=tax.clean, Var="Kingdom", Replaces, from = "from", to = "to", exact = TRUE)
+tax.clean.unidentified1<-FindReplace(data=tax.clean.unidentified, Var="Phylum", Replaces, from = "from", to = "to", exact = TRUE)
+tax.clean.unidentified2<-FindReplace(data=tax.clean.unidentified1, Var="Class", Replaces, from = "from", to = "to", exact = TRUE)
+tax.clean.unidentified3<-FindReplace(data=tax.clean.unidentified2, Var="Order", Replaces, from = "from", to = "to", exact = TRUE)
+tax.clean.unidentified4<-FindReplace(data=tax.clean.unidentified3, Var="Family", Replaces, from = "from", to = "to", exact = TRUE)
+tax.clean.unidentified5<-FindReplace(data=tax.clean.unidentified4, Var="Genus", Replaces, from = "from", to = "to", exact = TRUE)
+tax.clean.unidentified6<-FindReplace(data=tax.clean.unidentified5, Var="Species", Replaces, from = "from", to = "to", exact = TRUE)
+tax.clean<-tax.clean.unidentified6
+head(tax.clean)
+
+#Remove NAs so all blank
+tax.clean[is.na(tax.clean)]<-""
+
+#Replace all blanks with lowest taxonomic rank
+for (i in 1:7){ tax.clean[,i] <- as.character(tax.clean[,i])}
+tax.clean[is.na(tax.clean)] <- ""
+for (i in 1:nrow(tax.clean)){
+  if (tax.clean[i,2] == ""){
+    kingdom <- paste("Kingdom_", tax.clean[i,1], sep = "")
+    tax.clean[i, 2:7] <- kingdom
+  } else if (tax.clean[i,3] == ""){
+    phylum <- paste("Phylum_", tax.clean[i,2], sep = "")
+    tax.clean[i, 3:7] <- phylum
+  } else if (tax.clean[i,4] == ""){
+    class <- paste("Class_", tax.clean[i,3], sep = "")
+    tax.clean[i, 4:7] <- class
+  } else if (tax.clean[i,5] == ""){
+    order <- paste("Order_", tax.clean[i,4], sep = "")
+    tax.clean[i, 5:7] <- order
+  } else if (tax.clean[i,6] == ""){
+    family <- paste("Family_", tax.clean[i,5], sep = "")
+    tax.clean[i, 6:7] <- family
+  } else if (tax.clean[i,7] == ""){
+    tax.clean$Species[i] <- paste("Genus",tax.clean$Genus[i], sep = "_")
+  }
+}
+
+head(tax.clean)
+
+#Read back into phyloseq
+tax_table(CFSpIT_matched_controls_above0) <- as.matrix(tax.clean)
+head(tax_table(CFSpIT_matched_controls_above0))
+```
+
+Look at number of reads in samples and their distribution
+
+```{r}
+samplesums_table<-sample_sums(CFSpIT_matched_controls_above0)
+samplesums_table<-as.data.frame(samplesums_table)
+View(samplesums_table)
+
+#View the reads in descending order
+library(dplyr)
+library(tibble)
+samplesums_table <- samplesums_table %>% 
+  rownames_to_column(var = "SampleID")
+colnames(samplesums_table) <- c("SampleID", "total")
+
+library(tidyr)
+samplesums_table_order<-samplesums_table[order(-samplesums_table$total),]
+View(samplesums_table_order)
+
+#Visualise the read distribution using histograms
+
+library("data.table")
+library("ggplot2")
+
+sdt = data.table(as(sample_data(CFSpIT_matched_controls_above0), "data.frame"), TotalReads = sample_sums(CFSpIT_matched_controls_above0), keep.rownames = TRUE)
+setnames(sdt, "rn", "SampleID")
+pSeqDepth = ggplot(sdt, aes(TotalReads)) + geom_histogram() + ggtitle("Sequencing Depth")
+
+#Plot all samples
+pSeqDepth
+
+#Plot by sample type
+pSeqDepth + facet_wrap(~Sample.type)
+```
+
+##Checking for contamination using Decontam package
+
+```{r}
+library(decontam)
+library(ggplot2)
+
+#Put sample_data into a ggplot-friendly data.frame
+df <- as.data.frame(sample_data(CFSpIT_matched_controls_above0)) 
+df$LibrarySize <- sample_sums(CFSpIT_matched_controls_above0)
+df <- df[order(df$LibrarySize),]
+df$Index <- seq(nrow(df))
+ggplot(data=df, aes(x=Index, y=LibrarySize, color=Matched.samples)) + geom_point()
+
+#Use prevalence method for contaminant prediction, blanks are in "CF_Control" group
+sample_data(CFSpIT_matched_controls_above0)$is.neg <- sample_data(CFSpIT_matched_controls_above0)$Matched.samples == "CF_Control"
+
+contamdf.prev <- isContaminant(CFSpIT_matched_controls_above0, method="prevalence", neg="is.neg", threshold=0.1) #default threshold 0.1
+View(contamdf.prev)
+table(contamdf.prev$contaminant)
+
+#FALSE  TRUE (103 ASVs are contaminants)
+#5788    103
+
+which(contamdf.prev$contaminant)
+#[1]  111  122  132  134  139  224  309  507  574  581  602  675  689  811  943  976  979  984 1108 1126 1150 1204 1314 1335 1340 1391 1396 1411 1419
+#[30] 1426 1478 1614 1619 1652 1671 1753 1778 1949 1969 2075 2100 2125 2201 2247 2259 2310 2336 2398 2456 2481 2499 2574 2844 2883 2999 3104 3302 3342
+#[59] 3683 3697 3821 3829 3854 3895 3917 4135 4190 4191 4231 4233 4239 4250 4327 4479 4581 4585 4680 4717 4719 4728 4775 4796 4904 5035 5124 5226 5239
+#[88] 5263 5376 5392 5393 5431 5460 5558 5567 5608 5616 5618 5647 5648 5670 5701 5737
+
+
+#Want to look at which ASVs have been identified as contaminants across all samples - combine ASV, taxonomy and contaminant data
+
+#Export ASV and taxonomy tables, edit in Excel and read back into R to merge
+
+#ASV table
+#Save OTU table as matrix
+CFSpIT_matched_controls_above0_OTU = as(otu_table(CFSpIT_matched_controls_above0), "matrix")
+#Coerce to data.frame
+CFSpIT_matched_controls_above0_OTU_DF = as.data.frame(CFSpIT_matched_controls_above0_OTU)
+#write to .csv
+write.csv(CFSpIT_matched_controls_above0_OTU_DF, file='Fungal_diversity_decontam_OTU.csv') 
+
+#Open in Excel, make sure top left cell has 'OTUID' in it and save as .txt 
+
+#Taxonomy table
+write.csv(tax_table(CFSpIT_matched_controls_above0), file="Fungal_diversity_decontam_tax.csv")
+
+#Open in Excel and change Top left cell to 'OTUID', then resave
+
+#Read both .txt files back into R
+otu <- read.csv("Fungal_diversity_decontam_OTU_for_merge.csv", header = T, check.names = F) 
+tax	<- read.csv("Fungal_diversity_decontam_tax_for_merge.csv", header = T, check.names = F)
+
+merged_file	<- merge(otu, tax, by.x	= c("OTUID"), by.y=c("OTUID"))
+View(merged_file)
+
+#Re-order to a more useful order with column 1 as OTU_ID and column 2 as taxonomy
+library(dplyr)
+merged_file_taxa_first <- merged_file %>% select(OTUID, Kingdom, Phylum, Class, Order, Family, Genus, Species, everything())
+View(merged_file_taxa_first)
+
+#Combine the contaminant ASVs IDs with the merged_file_taxa_first file (ASV and taxonomy detail)
+merged_file_taxa_first_contaminants <- merge(merged_file_taxa_first, contamdf.prev, by.x = "OTUID", by.y = "row.names")
+View(merged_file_taxa_first_contaminants)
+
+#Write file to .csv
+write.csv(merged_file_taxa_first_contaminants, "Fungal_diversity_decontam_MERGED_contaminants.csv")
+#Open in Excel and check everything
+
+#As 7/10 ASVs in the mock community were identified as contaminants we did not use the results of Decontam to perform decontamination
+#Instead we performed read filtering and subsampling to minimise potential contamination from kits and reagents
+
+```
+
+
+##Filtering and subsampling reads
+
+Filter out ASVs representing less than 0.01% of total sequence reads
+
+```{r}
+#Find total read numbers
+tot <- sum(phyloseq::taxa_sums(CFSpIT_matched_controls_above0))
+tot
+#[1] 9399197
+
+#Use a function to filter out ASVs
+#The function has two parameters
+#1. physeq: A phyloseq-class object
+#2. frac: The minimum cutoff for the ASVs abundance in the table. This number is a fraction, not a percent.
+
+#If frac = 0.0001, this will retain all ASvs that have at least a 0.01% total abundance in the OTU table.
+#If you wanted to retain OTUs with at least 1% total abundance, you must specify, 0.01
+
+#Run function
+phyloseq_filter_taxa_tot_fraction <- function(physeq, frac = 0.01){
+  
+  ## Estimate total abundance of OTUs
+  tot <- sum(phyloseq::taxa_sums(physeq))
+  
+  ## Remove OTUs
+  res <- phyloseq::filter_taxa(physeq, function(x){ ( sum(x)/tot ) > frac }, prune = TRUE)
+  return(res)
+}
+
+#Run function on phyloseq object
+#>0.01% total abundance
+CFSpIT_matched_controls_above0_above0.01totabund <- phyloseq_filter_taxa_tot_fraction(CFSpIT_matched_controls_above0, frac = 0.0001)
+CFSpIT_matched_controls_above0_above0.01totabund
+
+sum(phyloseq::taxa_sums(CFSpIT_matched_controls_above0_above0.01totabund))
+#[1] 8870003
+#Retained 94.37% reads
+```
+
+Subsample to 6000 reads
+
+```{r}
+#Based on total reads this will exclude 4 samples plus 2 blanks
+#This leaves 25 complete BAL1, BAL2, BAL3 and IS sets plus the mock community and 1 blank
+
+#Use rngseed(123) to perform repeatable random subsampling
+CFSpIT_matched_controls_above0_above0.01totabund_subsample6000 <- rarefy_even_depth(CFSpIT_matched_controls_above0_above0.01totabund, sample.size = 6000, rngseed = 123, replace = FALSE)
+
+#Subset to the 100 samples in the 25 complete sets 
+CFSpIT_matched_controls_above0_above0.01totabund_subsample6000_25sets <- subset_samples(CFSpIT_matched_controls_above0_above0.01totabund_subsample6000, Patient !="Mock" & Patient !="CF_Control" & Patient !="CF100" & Patient !="CF169" & Patient !="CF205" & Patient !="CF66")
+CFSpIT_matched_controls_above0_above0.01totabund_subsample6000_25sets
+
+#Keep ASVs >0 reads
+CFSpIT_matched_controls_above0_above0.01totabund_subsample6000_25sets_above0 = prune_taxa(taxa_sums(CFSpIT_matched_controls_above0_above0.01totabund_subsample6000_25sets)>0, CFSpIT_matched_controls_above0_above0.01totabund_subsample6000_25sets) 
+CFSpIT_matched_controls_above0_above0.01totabund_subsample6000_25sets_above0
+
+```
+
+Check the coverage after filtering and subsampling
+
+```{r}
+library(metagMisc)
+library(iNEXT)
+
+#check original coverage
+coverage_original <- phyloseq_coverage(CFSpIT_matched_controls_above0)
+min(coverage_original$SampleCoverage) #Minimum=0.9998313
+
+#coverage after filtering and subsampling
+coverage_6000 <-phyloseq_coverage(CFSpIT_matched_controls_above0_above0.01totabund_subsample6000)
+min(coverage_6000$SampleCoverage) #Minimum=0.9951674
+
+#coverage after filtering and subsampling for 25 sets (100 samples)
+coverage_25sets <-phyloseq_coverage(CFSpIT_matched_controls_above0_above0.01totabund_subsample6000_25sets_above0)
+min(coverage_25sets$SampleCoverage) #Minimum=0.9951674
+
+```
+
+Export ASV and taxonomy tables, edit in Excel and read back into R to merge
+
+```{r}
+#ASV table
+#Save ASV as matrix
+CFSpIT_matched_controls_above0_above0.01totabund_subsample6000_OTU = as(otu_table(CFSpIT_matched_controls_above0_above0.01totabund_subsample6000), "matrix") #Save OTU as matrix
+# Coerce to data.frame
+CFSpIT_matched_controls_above0_above0.01totabund_subsample6000_OTU_DF = as.data.frame(CFSpIT_matched_controls_above0_above0.01totabund_subsample6000_OTU) 
+
+#write to .csv
+write.csv(CFSpIT_matched_controls_above0_above0.01totabund_subsample6000_OTU_DF, file='Fungal_diversity_decontam_above0.01totabund_subsample6000_OTU.csv')
+#Open in Excel and save as .txt (make sure top left cell has 'OTUID' in it)
+
+#Taxonomy table
+#write to .csv
+write.csv(tax_table(CFSpIT_matched_controls_above0_above0.01totabund_subsample6000), file="Fungal_diversity_decontam_above0.01totabund_subsample6000_tax.csv")
+#Open in Excel and change Top left cell to 'OTUID', then resave
+
+#Read both files back into R
+otu <- read.csv("Fungal_diversity_decontam_above0.01totabund_subsample6000_OTU_for_merge.csv", header = T, check.names = F) 
+tax	<- read.csv("Fungal_diversity_decontam_above0.01totabund_subsample6000_tax_for_merge.csv", header = T, check.names = F)
+
+merged_file	<- merge(otu, tax, by.x	= c("OTUID"), by.y=c("OTUID"))
+View(merged_file)
+
+#Re-order to a more useful order with column 1 as OTUID and column 2 as taxonomy
+library(dplyr)
+merged_file_taxa_first <- merged_file %>% select(OTUID, Kingdom, Phylum, Class, Order, Family, Genus, Species, everything())
+View(merged_file_taxa_first)
+
+#Save merged OTU table as a .csv so can open and edit in Excel
+write.csv(merged_file_taxa_first, "Fungal_diversity_decontam_above0.01totabund_subsample6000_MERGED.csv")
+```
+
+##Prepare ASV and ENV files for analysis
+
+ASV file
+
+Edit "Fungal_diversity_decontam_above0.01totabund_subsample6000_MERGED.csv" in Excel
+
+1) Subset to the 25 BAL123 IS pairs and remove any ASVs with 0 reads
+2) Sum the reads in each row and reorder in descending order (i.e. first row has the highest number of reads across all samples, last row has lowest number of reads)
+3) Remove columns on the left with taxonomic identifiers and OTUID
+4) Add in one column on the left of the sample columns with ASV numbers but no column header (ASV1 in first row to ASV668 in last row)
+5) Save as a .txt file
+
+Overall layout: first column is ASV number with no column header, other column are reads with sample names as column headers (Fungal_decontam_25Sets_ASVs_OTU.txt)
+
+ENV file
+
+Create the metadata file in Excel with Sample ID as the first column and other information (e.g. patient code, sample type, patient age) in the other columns and saved as a .csv. (Fungal_decontam_25Sets_ASVs_ENV.csv)
+
+Read in to R and make sure that the ASV and ENV files have the samples in the same order for analysis
+
+```{r}
+fungal_OTU<-read.table("Fungal_decontam_25Sets_ASVs_OTU.txt", header=T)
+View(fungal_OTU)
+str(fungal_OTU)
+
+#Read in metadata table with a column for sample names and other columns with additional metadata, all have headers
+fungal_env<-read.csv('Fungal_decontam_25Sets_ASVs_ENV.csv', header=T)
+View(fungal_env)
+
+#check that the sample names are in the same order in the OTU table (across) and the env file (down)
+#Save OTU table sample ID as an object (currently column names)
+Sample_ID_OTU<-colnames(fungal_OTU)
+Sample_ID_OTU
+
+#Save env file sample ID (currently in SAMPLE column)
+Sample_ID_env<-as.character(fungal_env$Sample)
+Sample_ID_env
+
+#check they are the same order
+all.equal(Sample_ID_OTU, Sample_ID_env) #TRUE
+```
+
+##Alpha diversity analysis
+
+```{r}
+#transpose the OTU table and create a matrix
+fungal_OTU_transpose<-t(fungal_OTU)   
+matrix_data<-data.matrix(fungal_OTU_transpose) 
+
+#Calculate Shannon diversity and ASV richness
+library(vegan)
+
+shannon.diversity <- diversity(matrix_data, "shannon")
+shannon.diversity <- as.data.frame(shannon.diversity) 
+shannon.diversity<-cbind(Sample=row.names(shannon.diversity),shannon.diversity)
+row.names(shannon.diversity) <- NULL
+
+richness<-specnumber(matrix_data)
+richness <- as.data.frame(richness)
+richness <- cbind(Sample=row.names(richness), richness)
+row.names(richness) <- NULL
+
+#Add shannon diversity and richness to ENV
+fungal_env_diversity<-merge(fungal_env, shannon.diversity, by = "Sample")
+fungal_env_diversity<-merge(fungal_env_diversity, richness, by = "Sample")
+
+#Save edited ENV file with diversity data
+write.csv(fungal_env_diversity, "Fungal_decontam_25Sets_ASVs_shannon_richness_ENV.csv")
+
+#Check everything
+View(fungal_env_diversity)
+colnames(fungal_env_diversity)
+
+#Boxplots of shannon diversity (Figure 1A)
+library(ggplot2)
+win.graph(800,800)
+
+plot1 <- ggplot(data=fungal_env_diversity, aes(x=Sample_type, y=shannon.diversity)) + geom_boxplot(aes(fill=Sample_type)) + theme_bw() + theme(panel.background = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + ylab("Shannon Index") + xlab("") + theme(axis.ticks.length=unit(.25, "cm")) + theme(text = element_text(size = 15))
+plot2 <- plot1 + scale_fill_manual(values=c("#1F78B4", "#33A02C", "#ff7f00", "black")) + theme(legend.position = "none")  + theme(axis.text.x = element_text(vjust = -2)) + theme(axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)))
+plot2
+
+#Boxplots of richness (Figure 1B)
+win.graph(800,800)
+plot3 <- ggplot(data=fungal_env_diversity, aes(x=Sample_type, y=richness)) + geom_boxplot(aes(fill=Sample_type)) + theme_bw() + theme(panel.background = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + ylab("Richness") + xlab("") + theme(axis.ticks.length=unit(.25, "cm")) + theme(text = element_text(size = 15))
+plot4 <- plot3 + scale_fill_manual(values=c("#1F78B4", "#33A02C", "#ff7f00", "black")) + theme(legend.position = "none")  + theme(axis.text.x = element_text(vjust = -2)) + theme(axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0))) 
+plot4
+
+#Statistical testing 
+
+#check data distribution (all values)
+hist(fungal_env_diversity$shannon.diversity) #middle peak, skewed slightly right
+hist(fungal_env_diversity$richness) #relatively normal
+
+#Test distribution (by groups)
+by(fungal_env_diversity$shannon.diversity, fungal_env_diversity$Sample_type, shapiro.test) #BAL1, BAL3 and BAL3 not normal
+bartlett.test (fungal_env_diversity$shannon.diversity ~  fungal_env_diversity$Sample_type) #equal variances
+
+by(fungal_env_diversity$richness, fungal_env_diversity$Sample_type, shapiro.test) #Normal
+bartlett.test (fungal_env_diversity$richness ~  fungal_env_diversity$Sample_type) #equal variances
+
+#Run Friedman test (non-parametric repeated measures) with event code as blocking
+library(PMCMR)
+
+#Shannon diversity
+friedman.test(fungal_env_diversity$shannon.diversity, groups = fungal_env_diversity$Sample_type, blocks = fungal_env_diversity$Patient)
+#No significant differences between groups (Friedman chi-squared = 5.832, df = 3, p-value = 0.1201)
+
+#Richness 
+friedman.test(fungal_env_diversity$richness, groups = fungal_env_diversity$Sample_type, blocks = fungal_env_diversity$Patient)
+#No significant differences between groups (Friedman chi-squared = 1.5301, df = 3, p-value = 0.6753)
+```
+
+##Beta divesity analysis
+
+NMDS ordination
+
+```{r}
+#Work with the transposed OTU table already created above (fungal_OTU_transpose)
+#This has the Samples in the first column and the taxa as other columns
+
+library(vegan)
+
+#run NMDS 2 dimensions using Bray-Curtis dissimilarity distance
+sol<-metaMDS(fungal_OTU_transpose, distance = "bray", k = 2, trymax = 50)
+sol #stress is high 0.2194035 
+
+#Adding metadata onto plot
+fungal_env_diversity$Sample_type<-as.factor(fungal_env_diversity$Sample_type)
+fungal_env_diversity$Sample_type
+#Levels: BAL1 BAL2 BAL3 IS
+
+#Specify colours for levels (in the same order as BAL1, BAL2, BAL3, IS)
+mypal<-c("#1F78B4", "#33A02C", "#ff7f00", "black")
+#Make default palette
+palette(mypal)
+
+#Standard plot with ellipses (Figure 1C)
+win.graph(800,800)
+plot(sol, display="sites", type="n", choices = c(1,2))
+points(sol, pch=19, col=fungal_env_diversity$Sample_type)
+ordiellipse(sol, group=fungal_env_diversity$Sample_type, show.groups = "BAL1", col="#1F78B4", kind="sd", lwd=2)
+ordiellipse(sol, group=fungal_env_diversity$Sample_type, show.groups = "BAL2", col="#33A02C", kind="sd", lwd=2)
+ordiellipse(sol, group=fungal_env_diversity$Sample_type, show.groups = "BAL3", col="#ff7f00", kind="sd", lwd=2)
+ordiellipse(sol, group=fungal_env_diversity$Sample_type, show.groups = "IS", col="black", kind="sd", lwd=2)
+
+#Add legend
+legend("bottomright", legend = c("BAL1","BAL2","BAL3","IS"), col=fungal_env_diversity$Sample_type, lwd = 2)
+
+#statistical testing
+
+#Calculate Bray-Curtis values
+BC_OTU_table<-vegdist(fungal_OTU_transpose, method = "bray", binary = FALSE)
+mat_BC <- data.matrix(BC_OTU_table)
+
+#check beta dispersion for sample type
+beta <- betadisper(BC_OTU_table, fungal_env_diversity$Sample_type)
+permutest(beta) 
+#P=0.383, not significant (groups have similar variance)
+
+#adonis
+adonis(mat_BC ~ Patient + Sample_type, data=fungal_env_diversity, permutations = 999)
+#             Df SumsOfSqs MeanSqs F.Model      R2 Pr(>F)    
+# Patient     24    15.843 0.66011  2.1510 0.40506  0.001 ***
+# Sample_type  3     1.173 0.39115  1.2746 0.03000  0.071 .  
+# Residuals   72    22.096 0.30688         0.56494           
+#Total       99    39.112                 1.0000      
+#Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+#Patient explains 41% of the variation, sample type explains 3% of the variation (R2)
+#Patient is signficant, sample type is not
+
+adonis(mat_BC ~ Sample_type, data=fungal_env_diversity, permutations = 999)
+
+#             Df SumsOfSqs MeanSqs F.Model   R2 Pr(>F)
+#Sample_type  3     1.173 0.39115 0.98978 0.03  0.479
+#Residuals   96    37.938 0.39519         0.97       
+#Total       99    39.112                 1.00  
+#Sample type not signficant
+```
+
+Comparison of Bray-Curtis dissimilarity distances for all samples
+
+```{r}
+#Work with the transposed OTU table already created above (fungal_OTU_transpose)
+#This has the Samples in the first column and the taxa as other columns
+
+#Calculate BC distances and make into matrix
+library(vegan)
+BC_BALIS<-vegdist(fungal_OTU_transpose, method="bray", binary = FALSE)
+matrixBALIS=data.matrix(BC_BALIS)
+View(matrixBALIS)
+
+#convert matrix to pairwise list (no 0s no duplicates)
+#run function
+flattenCorrMatrix <- function(cormat) {											
+  ut <- upper.tri(cormat)
+  data.frame(
+    row = rownames(cormat)[row(cormat)[ut]],
+    column = rownames(cormat)[col(cormat)[ut]],
+    cor  =(cormat)[ut]
+  )
+}
+#run function on BC matrix
+pairwise_flat<-flattenCorrMatrix(matrixBALIS)
+
+#save spreadsheet
+write.csv(pairwise_flat, file = "fungal_25_sets_pairwise_BAL123_IS_list.csv")
+
+#This spreadsheet is edited in Excel to produce: (1) a spreadsheet with only BAL1, BAL2 and BAL3 comparisons (n=3655), with columns added for Patient ID and whether the comparison is within or between patients (this will be read into R as a .csv to produce Figure 3), and (2) a spreadsheet with BAL1, BAL2, BAL3 and IS within patient comparisons (n=168), which was used to produce Table 2 and Supplementary Table S2 (no further analysis in R, all performed in Excel)
+
+#Read the BAL1, BAL2 and BAL3 comparison file into R
+BAL123_BC<-read.csv(file="pairwise_BAL123_list_within_between_R.csv",check.names=FALSE)
+colnames(BAL123_BC)
+
+#Convert Patient column into a factor
+BAL123_BC$Patient<-as.factor(BAL123_BC$Patient)
+
+#All the within comparisons have a Patient number, all the between comparisons have 'No patient'
+levels(BAL123_BC$Patient)
+
+#Convert Within_Between column into a factor
+BAL123_BC$Within_Between<-as.factor(BAL123_BC$Within_Between)
+levels(BAL123_BC$Within_Between)
+
+#Data preparation
+#subset data within
+data_subset_within<-subset(BAL123_BC, Within_Between=="Within")
+View(data_subset_within)
+
+#order patient number by age
+data_subset_within$Patient <- factor(data_subset_within$Patient, levels = c("CF185","CF157","CFOP41","CF76","CF77","CF102","CF178","CFOP42","CF164","CF53","CF90","CFOP38","CF82","CF179","CF152","CF96","CF147","CF194","CF79","CF109","CF181","CF198","CF182","CF98","CF55"))
+levels(data_subset_within$Patient)
+
+#Subset data between
+data_subset_between<-subset(BAL123_BC, Within_Between=="Between")
+View(data_subset_between)
+
+#Stripcharts for each patient
+library(ggplot2)
+plot1 <- ggplot(data_subset_within, aes(x=Patient, y=cor)) + geom_line(position=position_dodge(0.4), col="grey") +  geom_jitter(position=position_dodge(0.4), size=3) + theme(text = element_text(size=20), axis.text.x = element_text(angle = 45, hjust = 1, vjust = 0.9)) + xlab("") + ylab("")
+plot2 <- plot1 + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))	#change theme, no background or gridlines, black axis
+plot2
+
+#Reorder by patient age
+
+data_subset_within$Patient<-factor(data_subset_within$Patient, levels=c("CF185",	"CF157",	"CFOP41",	"CF76",	
+                                                                "CF77",	"CF102",	"CF178", "CFOP42",	"CF164",	
+                                                                "CF53",	"CF90", "CFOP38",	"CF82",	"CF179",
+                                                                "CF152",	"CF96",	"CF147",	"CF194",	
+                                                                "CF79",	"CF109",	"CF181",	"CF198",	
+                                                                "CF182",	"CF98",	"CF55"))
+
+#Stripcharts for each patient
+plot1 <- ggplot(data_subset_within, aes(x=Patient, y=cor)) + geom_line(position=position_dodge(0.4), col="grey") +  geom_jitter(position=position_dodge(0.4), size=3) + theme(text = element_text(size=20), axis.text.x = element_text(angle = 45, hjust = 1, vjust = 0.9)) + xlab("") + ylab("")
+plot2 <- plot1 + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))	#change theme, no background or gridlines, black axis
+plot2
+
+#Boxplots for within and between
+#Examine the data distribution for within and between groups
+hist(data_subset_within$cor, main = "Within", xlab = "Bray-Curtis dissimilarity distance") 
+hist(data_subset_between$cor, main = "Between", xlab = "Bray-Curtis dissimilarity distance") 
+
+#Neither are normally distributed so look at summary stats and use median and interquartile range as measure of spread
+
+#Within
+summary(data_subset_within$cor)
+median(data_subset_within$cor) #0.7613333
+IQR(data_subset_within$cor) 
+quantile(data_subset_within$cor)
+# 0%       25%       50%       75%      100% 
+# 0.0385000 0.6284167 0.7613333 0.9140000 0.9956667 
+
+#Between
+summary(data_subset_between$cor)
+median(data_subset_between$cor) #0.9253333
+IQR(data_subset_between$cor) 
+quantile(data_subset_between$cor) 
+# 0%       25%       50%       75%      100% 
+# 0.1335000 0.8337500 0.9253333 0.9646667 0.9976667 
+
+#Re-order factors to draw Boxplot
+BAL123_BC$Within_Between <-factor(BAL123_BC$Within_Between, levels=c("Within","Between"))
+levels(BAL123_BC$Within_Between)
+win.graph(800,800)
+plot3 <- ggplot(BAL123_BC, aes(x=Within_Between, y=cor, fill=Within_Between)) + geom_boxplot() + geom_boxplot(outlier.size = 3) + stat_summary(fun=mean, geom="point", shape=4, size=3, color="black") + theme(text = element_text(size=20), axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),legend.position = "none") + scale_fill_manual(values = c("#F8766D", "#619CFF")) + xlab("") + ylab("")
+plot4 <- plot3 + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))	#change theme, no background or gridlines, black axis
+plot4
+
+#Put the Stripchart and boxplot plots together (Figure 4)
+
+library(cowplot)
+#boxplot then stripchart (edited in powerpoint to include labels and patient ages)
+win.graph(1200,500)
+plot_grid(plot4,plot2,nrow=1, align = "h", rel_widths = c(1/6,5/6))
+
+#Further figure editing was performed in MicroSoft PowerPoint
+
+#Statistical testing of within and between boxplots
+
+histogram(data_subset_within$cor) #skewed right
+shapiro.test(data_subset_within$cor) #significant, not normal
+
+histogram(data_subset_between$cor) #skewed right
+shapiro.test(data_subset_between$cor) #significant, not normal
+
+bartlett.test(BAL123_BC$cor ~ BAL123_BC$Within_Between) #not equal
+library(car)
+leveneTest(BAL123_BC$cor ~ BAL123_BC$Within_Between)  #not equal
+
+wilcox.test(cor~Within_Between, data=BAL123_BC)
+
+# Wilcoxon rank sum test with continuity correction
+# data:  cor by Within_Between
+# W = 53600, p-value = 3.357e-12
+# alternative hypothesis: true location shift is not equal to 0
+
+```
+
+##GAMLESS-BEZI (differences in genus relative abundance between groups)
+
+```{r}
+library(gamlss)
+library(ggplot2)
+library(cowplot)
+library(tidyr)
+
+#Read .csv file with column 1 as sample, column 2 as groupings (sample type), remaining columns are Genus relative abundances for (Candida, Aspergillus, Dipodascus, Lecanicillium, Simplicillium, Exophiala and Scedosporium)
+
+data <-read.csv("GAMLESS_genus_R.csv", header = T) 
+head(data)
+
+#Visualise data distribution using histograms
+win.graph()
+par(mfrow=c(3,3))
+hist(data$Candida, main = "Candida", xlab = "Relative abundance (%)") 
+hist(data$Aspergillus, main = "Aspergillus", xlab = "Relative abundance (%)")
+hist(data$Dipodascus, main = "Dipodascus", xlab = "Relative abundance (%)")
+hist(data$Lecanicillium, main = "Lecanicillium", xlab = "Relative abundance (%)") 
+hist(data$Simplicillium, main = "Simplicillium", xlab = "Relative abundance (%)")
+hist(data$Exophiala, main = "Exophiala", xlab = "Relative abundance (%)")
+hist(data$Scedosporium, main = "Scedosporium", xlab = "Relative abundance (%)")
+
+#All BEINF0, BEZI beta inflated at 0
+
+#Make sample type a factor
+data$Type<-as.factor(data$Type)
+data$Type
+
+#Reorder so that model compares everything against IS
+data$Type <- factor(data$Type, levels = c("IS", "BAL1", "BAL2", "BAL3")) 
+data$Type
+
+#Boxplots to visualise spread of relative abundance values for each genus
+# with y axis scaling 0-1
+plot1<-ggplot(data, aes(x=Type, y=Candida, color=Type)) + geom_boxplot() + stat_summary(fun=mean, colour="black", geom="point", shape=3, size=2) + theme(legend.position = "none") + theme(axis.title.x = element_blank()) + ylim(0,1) # check with boxplot that reordered correctly, ok
+plot2<-ggplot(data, aes(x=Type, y=Aspergillus, color=Type)) + geom_boxplot() + stat_summary(fun=mean, colour="black", geom="point", shape=3, size=2) + theme(legend.position = "none") + theme(axis.title.x = element_blank()) + ylim(0,1)
+plot3<-ggplot(data, aes(x=Type, y=Dipodascus, color=Type)) + geom_boxplot() + stat_summary(fun=mean, colour="black", geom="point", shape=3, size=2) + theme(legend.position = "none") + theme(axis.title.x = element_blank()) + ylim(0,1)
+plot4<-ggplot(data, aes(x=Type, y=Lecanicillium, color=Type)) + geom_boxplot() + stat_summary(fun=mean, colour="black", geom="point", shape=3, size=2) + theme(legend.position = "none") + theme(axis.title.x = element_blank()) + ylim(0,1)
+plot5<-ggplot(data, aes(x=Type, y=Simplicillium, color=Type)) + geom_boxplot() + stat_summary(fun=mean, colour="black", geom="point", shape=3, size=2) + theme(legend.position = "none") + theme(axis.title.x = element_blank()) + ylim(0,1)
+plot6<-ggplot(data, aes(x=Type, y=Exophiala, color=Type)) + geom_boxplot() + stat_summary(fun=mean, colour="black", geom="point", shape=3, size=2) + theme(legend.position = "none") + theme(axis.title.x = element_blank()) + ylim(0,1)
+plot7<-ggplot(data, aes(x=Type, y=Scedosporium, color=Type)) + geom_boxplot() + stat_summary(fun=mean, colour="black", geom="point", shape=3, size=2) + theme(legend.position = "none") + theme(axis.title.x = element_blank()) + ylim(0,1)
+
+# plot
+win.graph()
+plot_grid(plot1,plot2,plot3,plot4,plot5,plot6,plot7, nrow=3, ncol = 3, align = "h")
+
+#convert patient to factor
+data$Patient<-as.factor(data$Patient)
+
+#Run a model for each genus (results link to Table S2)
+modCandida <- gamlss(Candida ~ Type + random(Patient),  family = BEZI, data = data)
+summary(modCandida)
+
+#Significant for IS-BAL1 (p=0.03311 *), IS-BAL2 (0.00113 **) and IS-BAL3 (0.00551 **)
+
+modAspergillus <- gamlss(Aspergillus ~ Type + random(Patient),  family = BEZI, data = data)
+summary(modAspergillus)
+#No significant comparisons
+
+modDipodascus <- gamlss(Dipodascus ~ Type + random(Patient),  family = BEZI, data = data)
+summary(modDipodascus)
+#No significant comparisons
+
+modLecanicillium <- gamlss(Lecanicillium ~ Type + random(Patient),  family = BEZI, data = data)
+summary(modLecanicillium)
+#No significant comparisons
+
+modSimplicillium <- gamlss(Simplicillium ~ Type + random(Patient),  family = BEZI, data = data)
+summary(modSimplicillium)
+#No significant comparisons
+
+modExophiala <- gamlss(Exophiala ~ Type + random(Patient),  family = BEZI, data = data)
+summary(modExophiala)
+#No significant comparisons
+
+modScedosporium <- gamlss(Scedosporium ~ Type + random(Patient),  family = BEZI, data = data)
+summary(modScedosporium)
+#No significant comparisons
+
+```
+
+##Indicator species analysis (associations between ASVs and groups)
+
+```{r}
+library(indicspecies)
+
+#Read .csv file with column 1 sample, column 2 as groupings (sample type), remaining columns are ASVs (read numbers)
+indicspecies_data = read.csv("25_sets_indicator_analysis_R.csv", header= TRUE)
+head(indicspecies_data)
+
+#create an abundance table
+abund <- indicspecies_data[,3:ncol(indicspecies_data)]
+str(abund)
+
+#create a vector of the groupings
+sample_type<- indicspecies_data$sample.type
+str(sample_type)
+
+#Run the indicator species command multipatt
+#func is the function that multipatt is using to identify the indicator species
+#"r.g" function is a "point biserial correlation coefficient", which measures the correlation betweeen two binary vectors
+#Option to set the number of permuations
+
+inv = multipatt(abund, sample_type, func = "r.g", control = how(nperm = 9999))
+summary(inv) #Table S3
+
+#Re-run on proportions to double check
+abund_percent<-abund/rowSums(abund)
+View(abund_percent)
+
+inv2 = multipatt(abund_percent, sample_type, func = "r.g", control = how(nperm = 9999))
+summary(inv2)
+
+#Very similar results reads vs relative abundance
+
+```
+
+##Stacked barcharts
+
+```{r}
+#Stacked barcharts of the Top25 ASVs consolidated to the lowest taxonomic rank for BAL1, BAL2, BAL3 and IS
+#Read in csv where first 5 columns are sample information, next 21 columns are consolidated ASVs and last column is all other ASVs (read numbers)
+
+Top25_ASVs<-read.csv("Fungal_decontam_25Sets_Top25ASVs_consol_stacked.csv", header = T)
+View(Top25_ASVs)
+colnames(Top25_ASVs)
+
+#Plot the Top25 and other ASVs as stacked barchart for each sample type - READS (Figure 1D)
+#change data to long format 
+library(tidyr)
+data_long <- gather(Top25_ASVs, ASV, Sequences, Genus_Aspergillus:Other_ASVs, factor_key=TRUE) 
+head(data_long)
+View(data_long)
+colnames(data_long)
+
+#palette
+library('RColorBrewer')
+colourCount = length(unique(data_long$ASV)) #number of colours required worked out from genus number
+getPalette = colorRampPalette(brewer.pal(9, "Set1")) #palette selection
+
+library(ggplot2)
+win.graph(1000,800)
+ggplot(data_long, aes(fill=ASV, y=Sequences, x=Sample_type)) + geom_bar( stat="identity") + scale_fill_manual(values = getPalette(colourCount)) +
+  theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.3, hjust=1)) + 
+  xlab("Sample Type") + theme(axis.title.x = element_text(margin = margin(t = 15, r = 0, b = 0, l = 0))) + 
+  ylab ("Number of sequence reads") + theme(axis.title.y = element_text(margin = margin(t = 0, r = 20, b = 0, l = 0))) +
+  guides(fill=guide_legend(ncol=1)) + theme(legend.margin = margin(0,0,0,20)) +
+  theme(text = element_text(size = 20)) + theme(legend.title = element_blank())
+
+#Plot the Top25 and other ASVs as stacked barchart for each patient broken down by sample type - RELATIVE ABUNDANCE
+
+#Calculate relative abundance of the ASVs for each patient
+Top25_ASVs_relabund<-Top25_ASVs
+Top25_ASVs_relabund[,6:27]<-(Top25_ASVs_relabund[,6:27])/6000*100
+colnames(Top25_ASVs_relabund)
+
+#change data to long format 
+data_long2 <- gather(Top25_ASVs_relabund, ASV, Relabund, Genus_Aspergillus:Other_ASVs, factor_key=TRUE) 
+head(data_long)
+View(data_long)
+colnames(data_long)
+View(Top25_ASVs_relabund)
+
+#palette
+library('RColorBrewer')
+colourCount = length(unique(data_long2$ASV)) #number of colours required worked out from genus number
+getPalette = colorRampPalette(brewer.pal(9, "Set1")) #palette selection
+
+win.graph()
+plot2<-ggplot(data_long2, aes(fill=ASV, y=Relabund, x=Sample_type)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  geom_bar( stat="identity") + scale_fill_manual(values = getPalette(colourCount)) + 
+  theme(axis.text.x= element_text(size = 15, angle = 90, vjust = 0.4, hjust = 1)) + xlab("Sample Type") + 
+  theme(axis.text.y= element_text(size = 15)) +
+  theme(axis.title.x = element_text(size=15, margin = margin(t = 15, r = 0, b = 0, l = 0))) + ylab ("Relative abundance (%)") + 
+  theme(axis.title.y = element_text(size=15, margin = margin(t = 0, r = 15, b = 0, l = 0)))
+
+plot2 + facet_wrap(~Patient, nrow = 3) + theme(legend.margin = margin(0,0,0,20)) +
+  theme(strip.text.x = element_text(size = 15)) + guides(fill=guide_legend(ncol=1)) +
+  theme(legend.text=element_text(size=15),legend.title = element_blank(), legend.key = element_rect(size = 2, fill = NA, colour = "white"), legend.key.width = unit(0.8, "cm"),
+        legend.key.height = unit(0.8, "cm"))
+
+#Reorder based on patient age
+data_long2$Patient_age
+data_long2$Patient_age<-as.factor(data_long2$Patient_age)
+data_long2$Patient_age<-factor(data_long2$Patient_age, levels=c("CF185 (1.1)",	"CF157 (1.1)",	"CFOP41 (1.3)",	"CF76 (2.7)",	
+                                                                "CF77 (5.2)",	"CF102 (5.4)",	"CF178 (6.5)",	
+                                                                "CFOP42 (6.6)",	"CF164 (7.1)",	"CF53 (7.2)",	"CF90 (8.2)",	
+                                                                "CFOP38 (8.7)",	"CF82 (11.3)",	"CF179 (11.8)",
+                                                                "CF152 (11.9)",	"CF96 (12.6)",	"CF147 (12.6)",	"CF194 (12.7)",	
+                                                                "CF79 (13.2)",	"CF109 (13.8)",	"CF181 (14.0)",	"CF198 (14.8)",	
+                                                                "CF182 (14.9)",	"CF98 (16.6)",	"CF55 (17.7)"))
+
+
+#Figure S2
+win.graph()
+plot2<-ggplot(data_long2, aes(fill=ASV, y=Relabund, x=Sample_type)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  geom_bar( stat="identity") + scale_fill_manual(values = getPalette(colourCount)) + 
+  theme(axis.text.x= element_text(size = 15, angle = 90, vjust = 0.4, hjust = 1)) + xlab("Sample Type") + 
+  theme(axis.text.y= element_text(size = 15)) +
+  theme(axis.title.x = element_text(size=15, margin = margin(t = 15, r = 0, b = 0, l = 0))) + ylab ("Relative abundance (%)") + 
+  theme(axis.title.y = element_text(size=15, margin = margin(t = 0, r = 15, b = 0, l = 0)))
+
+plot2 + facet_wrap(~Patient_age, nrow = 3) + theme(legend.margin = margin(0,0,0,20)) +
+  theme(strip.text.x = element_text(size = 15)) + guides(fill=guide_legend(ncol=1)) +
+  theme(legend.text=element_text(size=15),legend.title = element_blank(), legend.key = element_rect(size = 2, fill = NA, colour = "white"), legend.key.width = unit(0.8, "cm"),
+        legend.key.height = unit(0.8, "cm"))
+
+#Subset of patients to represent diversity of profile types
+
+#Diverse, little Aspergillus or Candida: CF185
+#Diverse, Aspergillus and Candida: CFOP42
+#Different profiles for each sample: CF152
+#Dominant Candida: CF147
+#Dominant Aspergillus: CF98
+
+subset_profiles <- subset(data_long2, Patient=="CF185"|Patient=="CFOP42"|Patient=="CF147"|Patient=="CF98"|Patient=="CF152")
+#Re-order levels
+subset_profiles$Patient_age<-factor(subset_profiles$Patient_age, levels=c("CF185 (1.1)","CFOP42 (6.6)","CF147 (12.6)","CF98 (16.6)","CF152 (11.9)"))
+subset_profiles
+
+#palette
+library('RColorBrewer')
+colourCount = length(unique(subset_profiles$ASV)) #number of colours required worked out from genus number
+getPalette = colorRampPalette(brewer.pal(9, "Set1")) #palette selection
+
+#Figure 3
+win.graph(2200,1000)
+plot2<-ggplot(subset_profiles, aes(fill=ASV, y=Relabund, x=Sample_type)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  geom_bar( stat="identity") + scale_fill_manual(values = getPalette(colourCount)) + 
+  theme(axis.text.x= element_text(size = 15, angle = 90, vjust = 0.4, hjust = 1)) + xlab("Sample Type") + 
+  theme(axis.text.y= element_text(size = 15)) +
+  theme(axis.title.x = element_text(size=15, margin = margin(t = 15, r = 0, b = 0, l = 0))) + ylab ("Relative abundance (%)") + 
+  theme(axis.title.y = element_text(size=15, margin = margin(t = 0, r = 15, b = 0, l = 0)))
+
+plot2 + facet_wrap(~Patient_age, nrow=1) + theme(legend.margin = margin(0,0,0,20)) +
+  theme(strip.text.x = element_text(size = 15)) + guides(fill=guide_legend(ncol=1)) +
+  theme(legend.text=element_text(size=14),legend.title = element_blank(), legend.key = element_rect(size = 2, fill = NA, colour = "white"), legend.key.width = unit(0.6, "cm"),
+        legend.key.height = unit(0.6, "cm"))
+
+
+#Differences in the % of communities made up by the Top25 ASVs (links to Figure 1C)
+ 
+#Read in file with Sample, Patient, Sample_type, Top 25 ASVs total reads and Top 25 ASVs total percentage columns
+Top25_stats<-read.csv("Fungal_decontam_25Sets_Top25ASVs_consol_percentage.csv", header = T)
+View(Top25_stats)
+
+#Statistical testing 
+#check data distribution percentage (all values)
+hist(Top25_stats$Top25_percentage) #middle peak, skewed slightly right
+shapiro.test(Top25_stats$Top25_percentage) #not normal p=0.002
+boxplot(Top25_stats$Top25_percentage ~ Top25_stats$Sample_type) #Have an outlier for BAL2
+
+#check data distribution reads (all values)
+hist(Top25_stats$Total_Top25) #middle peak, skewed slightly right
+shapiro.test(Top25_stats$Total_Top25) #not normal p=0.002
+boxplot(Top25_stats$Total_Top25 ~ Top25_stats$Sample_type) #Have an outlier for BAL2
+
+#Test distribution (by groups)
+BAL1_subset<-subset(Top25_stats, Top25_stats$Sample_type == "BAL1")
+summary(BAL1_subset)
+hist(BAL1_subset$Top25_percentage)
+
+# Min.   :22.33
+# Median :69.85
+# Mean   :63.68
+# Max.   :98.10
+
+BAL2_subset<-subset(Top25_stats, Top25_stats$Sample_type == "BAL2")
+summary(BAL2_subset)
+hist(BAL2_subset$Top25_percentage)
+
+# Min.   : 6.683
+# Median :72.867
+# Mean   :67.915
+# Max.   :98.200
+
+BAL3_subset<-subset(Top25_stats, Top25_stats$Sample_type == "BAL3")
+summary(BAL3_subset)
+hist(BAL3_subset$Top25_percentage)
+
+# Min.   :10.77
+# Median :64.12
+# Mean   :57.95
+# Max.   :99.72
+
+IS_subset<-subset(Top25_stats, Top25_stats$Sample_type == "IS")
+summary(IS_subset)
+hist(IS_subset$Top25_percentage)
+
+# Min.   :39.25
+# Median :69.07
+# Mean   :69.57
+# Max.   :99.55
+
+#Mixture of distributions, some more normal, some skewed
+
+#Test normality and homogeneity of variances
+by(Top25_stats$Top25_percentage, Top25_stats$Sample_type, shapiro.test) #normal (p=0.19, p=0.07, p=0.98, p=0.12)
+bartlett.test (Top25_stats$Top25_percentage ~  Top25_stats$Sample_type) #equal variances
+library(car)
+leveneTest(Top25_stats$Top25_percentage ~  Top25_stats$Sample_type) #equal variances
+
+#Run one way ANOVA with repeated measures
+ANOVAmod<-aov(Top25_percentage ~ factor(Sample_type) + Error(factor(Patient)), data=Top25_stats)
+summary(ANOVAmod) #non-significant results       
+
+# Error: factor(Patient)
+# Df Sum Sq Mean Sq F value Pr(>F)
+# Residuals 24  23816   992.3               
+# Error: Within
+#                     Df Sum Sq Mean Sq F value Pr(>F)
+# factor(Sample_type)  3   2016   671.9   1.578  0.202
+# Residuals           72  30657   425.8     
+
+#Run Friedman test (non-parametric repeated measures) with event code as blocking
+library(PMCMR)
+friedman.test(Top25_stats$Top25_percentage, groups = Top25_stats$Sample_type, blocks = Top25_stats$Patient)
+#Friedman chi-squared = 3.576, df = 3, p-value = 0.311 non-significant results
+
+#Both parametric and non-parametric tests give non-significant results
+
+```
+
+##Investigating associations between age and fungal diversity
+
+Age and fungal diversity 
+
+```{r}
+#Read in csv with column 1 as sample, column 2 as sample type (BAL1, BAL2, BAL3 and IS separate), column 3 as sample type 3 (BAL123 together, IS separate), column 4 as age, column 5 as age group, column 6 as Shannon diversity
+
+data <- read.csv("Fungal_decontam_25Sets_ASVs_diversity_ENV.csv", header = T )
+head(data)
+colnames(data)
+
+#subset data based on different sample types for later
+subsetBAL1<-subset(data, Sample_type=="BAL1")
+subsetBAL2<-subset(data, Sample_type=="BAL2")
+subsetBAL3<-subset(data, Sample_type=="BAL3")
+subsetBAL123<-subset(data, Sample_type2=="BAL")
+subsetIS<-subset(data, Sample_type=="IS")
+
+#BOXPLOTS of sample type versus diversity
+
+boxplot(shannon.diversity~Sample_type, data=data) #basic boxplot of data
+stats<-boxplot(shannon.diversity~Sample_type, data=data) #stats
+stats #show stats
+
+#test normality by plotting histograms and shapiro-wilk test 
+hist(subsetBAL1$shannon.diversity, probability = T) #skewed right
+lines(density(subsetBAL1$shannon.diversity),col=2)
+
+hist(subsetBAL2$shannon.diversity, probability = T) #left and right peaks
+lines(density(subsetBAL2$shannon.diversity),col=2)
+
+hist(subsetBAL3$shannon.diversity, probability = T) #skewed right
+lines(density(subsetBAL3$shannon.diversity),col=2)
+
+hist(subsetBAL123$shannon.diversity, probability = T) #skewed right, small left peak
+lines(density(subsetBAL3$shannon.diversity),col=2)
+
+hist(subsetIS$shannon.diversity, probability = T) #left and right peaks
+lines(density(subsetIS$shannon.diversity),col=2)
+
+#BAL123IS separate
+by (data$shannon.diversity, data$Sample_type, shapiro.test) #BALs not normal, IS normal
+bartlett.test (data$shannon.diversity ~ data$Sample_type)	#Not significant, homogeneous variances
+library(car)
+leveneTest(data$shannon.diversity ~ data$Sample_type)
+
+#BAL123 and IS
+by (data$shannon.diversity, data$Sample_type2, shapiro.test) #BALs not normal, IS normal
+bartlett.test (data$shannon.diversity ~ data$Sample_type2)	#Not significant, homogeneous variances
+leveneTest(data$shannon.diversity ~ data$Sample_type2)
+
+#scatterplot of diversity against age for sample types
+#linear regression, independent variable = age, dependent variable = diversity
+#null hypothesis, the intercept and slope are equal to 1
+#p-values given for intercept and slope
+#t-value, the larger this is, the less likely that the coefficient is not equal to 0 by chance
+#r-squared is the proportion of variation in the dependent (reposonse) variable that is explained by the model (how well the data fit the regression line)
+
+#Check residuals - the difference between the observed dependent data and the predicted data (the regression line)
+#If you plot the residual data, there should be random scatter around the line (0,0) identifying that a linear model is the right model choice
+#If there isn't random scatter, you should look at a non-linear model to best represent the data
+
+#BALs separately
+BAL1mod <- lm(shannon.diversity ~ Age, data=subsetBAL1)
+summary(BAL1mod) 
+#Not significant
+BAL2mod <- lm(shannon.diversity ~ Age, data=subsetBAL2)
+summary(BAL2mod)
+plot(BAL2mod)
+qqnorm(resid(BAL2mod))
+qqline(resid(BAL2mod))
+
+#Significant
+BAL3mod <- lm(shannon.diversity ~ Age, data=subsetBAL3)
+summary(BAL3mod)
+#Not significant
+
+#IS
+ISmod <- lm(shannon.diversity ~ Age, data=subsetIS)
+summary(ISmod)
+#Not significant
+
+plot(ISmod)
+qqnorm(resid(ISmod))
+qqline(resid(ISmod))
+
+#plot
+plot(subsetIS$Age, subsetIS$shannon.diversity, pch=16, col="black", main="IS")
+abline(lm((subsetIS$shannon.diversity ~ subsetIS$Age)))
+
+#For BAL need a mixed model and take into account patient
+library(nlme)
+BAL123mixedlm<-lme(shannon.diversity~Age, random = ~1|Patient, data=subsetBAL123) #NS
+summary(BAL123mixedlm)
+#Not significant
+
+plot(BAL123mixedlm)
+qqnorm(resid(BAL123mixedlm))
+qqline(resid(BAL123mixedlm))
+
+plot(subsetBAL123$Age, subsetBAL123$shannon.diversity, pch=16, col="black", main="BAL123")
+abline(lm((subsetBAL123$shannon.diversity ~ subsetBAL123$Age)))
+
+#ggplot
+library(ggplot2)
+
+#IS 
+plot1<- ggplot(subsetIS, aes(x=subsetIS$Age, y=subsetIS$shannon.diversity)) + geom_point() + 
+  geom_smooth(method = lm, se=FALSE, fullrange=TRUE) + theme_bw(base_size = 20) + xlab("Age (years)") +
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0))) +
+  ylab("Shannon diversity") + theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0))) + ylim(0,4)
+
+plot2<- plot1 + theme(legend.position = "none")
+plot2
+
+#BAL 
+plot3<-ggplot(subsetBAL123, aes(x=subsetBAL123$Age, y=subsetBAL123$shannon.diversity)) + geom_point() + 
+geom_smooth(method = lm, se=FALSE, fullrange=TRUE) + theme_bw(base_size = 20) + xlab("Age (years)") +
+theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0))) +
+ylab("Shannon diversity") + theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0))) + ylim(0,4)
+
+plot4<- plot3 + theme(legend.position = "none")
+plot4
+
+#Figure S3, panel A
+win.graph(600, 1000)
+library(cowplot)
+plot_grid(plot2,plot4,ncol=1, align = "h")
+
+```
+
+Age and fungal genus relative abundance (heatmap)
+
+```{r}
+#Read in csv with column 1 as sample, column 2 as sample type (BAL1, BAL2, BAL3 and IS separate), column 3 as sample type 3 (BAL123 together, IS separate), column 4 as age, column 5 as age group, column 6 as Shannon diversity (same as previous section)
+
+env=read.csv("Fungal_decontam_25Sets_ASVs_diversity_ENV.csv", header=T)	
+
+#BAL123
+env_BAL123 <- subset(env, Sample_type2=="BAL")
+View(env_BAL123)
+env_BAL123_Age <- as.factor(env_BAL123$Age_group)
+env_BAL123_Age
+
+OTU_table_BAL123 = read.table("25Sets_genus_relabund_age_OTU_BAL123_R.txt", header=T, check.names="FALSE") 
+View(OTU_table_BAL123)
+
+#check that the sample names are in the same order in the OTU table (across) and the env file (down)
+#Save OTU table sample ID as an object (currently column names)
+Sample_ID_OTU<-colnames(OTU_table_BAL123)
+Sample_ID_OTU
+
+#Save env file sample ID (currently in SAMPLE column)
+Sample_ID_env<-as.character(env_BAL123$Sample)
+Sample_ID_env
+
+#check they are the same order
+all.equal(Sample_ID_OTU, Sample_ID_env) #TRUE
+
+library(colorspace)
+mypalette<-choose_palette()	 #select 'Basic: Sequential (single-hue)' palette, L2 moved to 100
+col_rev <- rev(mypalette(25)) #use palette with 25 colours in reverse order
+
+#Heatmap for BALs (Figure S3, panel B bottom)
+win.graph(1200,300)
+library(NMF)
+aheatmap(OTU_table_BAL123, Rowv=NA, Colv=NA, color = col_rev, annCol = list('Age'=env_BAL123_Age), annColors = list(c("<6" ="goldenrod1", "6-12"="orange","12-18"="red")))               
+
+#IS
+env_IS <- subset(env, Sample_type2=="IS")
+View(env_IS)
+env_IS_Age <- as.factor(env_IS$Age_group)
+
+OTU_table_IS = read.table("25Sets_genus_relabund_age_OTU_IS_R.txt", header=T, check.names="FALSE") 
+View(OTU_table_IS)
+
+#check that the sample names are in the same order in the OTU table (across) and the env file (down)
+#Save OTU table sample ID as an object (currently column names)
+Sample_ID_OTU<-colnames(OTU_table_IS)
+Sample_ID_OTU
+
+#Save env file sample ID (currently in SAMPLE column)
+Sample_ID_env<-as.character(env_IS$Sample)
+Sample_ID_env
+
+#check they are the same order
+all.equal(Sample_ID_OTU, Sample_ID_env) #TRUE
+
+#Heatmap for ISs (Figure S3, panel B top)
+win.graph(1200,300)
+library(NMF)
+aheatmap(OTU_table_IS, Rowv=NA, Colv=NA, color = col_rev, annCol = list('Age'=env_IS_Age), annColors = list(c("<6" ="goldenrod1", "6-12"="orange","12-18"="red")))   
+
+#Figure S3 put together and edited in MicroSoft PowerPoint
+
+```
+
+
+
